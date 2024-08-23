@@ -298,6 +298,9 @@ static void uvServerReadCb(uv_stream_t *stream,
                 case RAFT_INSTALL_SNAPSHOT:
                     s->message.install_snapshot.data.base = s->payload.base;
                     break;
+                case RAFT_REQUEST_CUSTOM:
+                    s->message.request_custom.data.base = s->payload.base;
+                    break;
                 default:
                     /* We should never have read a payload in the first place */
                     assert(0);

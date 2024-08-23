@@ -386,6 +386,16 @@ struct raft_timeout_now
 };
 
 /**
+ * Hold the custom request data
+ */
+struct raft_request_custom
+{
+    unsigned char version;
+    raft_term term;          /* Sender's current_term. */
+    struct raft_buffer data; /* Raw request data. */
+};
+
+/**
  * Type codes for RPC messages.
  */
 enum raft_message_type {
@@ -394,7 +404,8 @@ enum raft_message_type {
     RAFT_REQUEST_VOTE,
     RAFT_REQUEST_VOTE_RESULT,
     RAFT_INSTALL_SNAPSHOT,
-    RAFT_TIMEOUT_NOW
+    RAFT_TIMEOUT_NOW,
+    RAFT_REQUEST_CUSTOM
 };
 
 /**
@@ -436,6 +447,7 @@ struct raft_message
         struct raft_append_entries_result append_entries_result;
         struct raft_install_snapshot install_snapshot;
         struct raft_timeout_now timeout_now;
+        struct raft_request_custom request_custom;
     };
 };
 
