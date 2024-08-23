@@ -89,6 +89,12 @@ static size_t sizeofTimeoutNow(void)
            sizeof(uint64_t) /* Last log term. */;
 }
 
+static size_t sizeofRequestCustom(void)
+{
+    return sizeof(uint64_t) + /* Term. */
+           sizeof(uint64_t);  /* Length of custom data */
+}
+
 size_t uvSizeofBatchHeader(size_t n)
 {
     return 8 + /* Number of entries in the batch, little endian */
@@ -198,6 +204,14 @@ static void encodeTimeoutNow(const struct raft_timeout_now *p, void *buf)
     bytePut64(&cursor, p->last_log_term);
 }
 
+static void encodeRequestCustom(const struct raft_request_custom *p, void *buf)
+{
+    uint8_t *cursor = buf;
+
+    bytePut64(&cursor, p->term);     /* Leader's term */
+    bytePut64(&cursor, p->data.len); /* Length of snapshot data */
+}
+
 int uvEncodeMessage(const struct raft_message *message,
                     uv_buf_t **bufs,
                     unsigned *n_bufs)
@@ -234,6 +248,10 @@ int uvEncodeMessage(const struct raft_message *message,
             header.len += sizeofTimeoutNow();
             version = message->timeout_now.version;
             break;
+        case RAFT_REQUEST_CUSTOM:
+            header.len += sizeofRequestCustom();
+            version = message->timeout_now.version;
+            break;
         default:
             return RAFT_MALFORMED;
     };
@@ -254,6 +272,8 @@ int uvEncodeMessage(const struct raft_message *message,
 
     bytePut64(&cursor, header.len - RAFT_IO_UV__PREAMBLE_SIZE);
 
+    *n_bufs = 1;
+
     /* Encode the request header. */
     switch (message->type) {
         case RAFT_REQUEST_VOTE:
@@ -264,29 +284,26 @@ int uvEncodeMessage(const struct raft_message *message,
             break;
         case RAFT_APPEND_ENTRIES:
             encodeAppendEntries(&message->append_entries, cursor);
+            /* For AppendEntries request we also send the entries payload. */
+            *n_bufs += message->append_entries.n_entries;
             break;
         case RAFT_APPEND_ENTRIES_RESULT:
             encodeAppendEntriesResult(&message->append_entries_result, cursor);
             break;
         case RAFT_INSTALL_SNAPSHOT:
             encodeInstallSnapshot(&message->install_snapshot, cursor);
+            /* For InstallSnapshot request we also send the snapshot payload. */
+            *n_bufs += 1;
             break;
         case RAFT_TIMEOUT_NOW:
             encodeTimeoutNow(&message->timeout_now, cursor);
             break;
+        case RAFT_REQUEST_CUSTOM:
+            encodeRequestCustom(&message->request_custom, cursor);
+            /* For RequestCustom we also send the custom data */
+            *n_bufs += 1;
+            break;
     };
-
-    *n_bufs = 1;
-
-    /* For AppendEntries request we also send the entries payload. */
-    if (message->type == RAFT_APPEND_ENTRIES) {
-        *n_bufs += message->append_entries.n_entries;
-    }
-
-    /* For InstallSnapshot request we also send the snapshot payload. */
-    if (message->type == RAFT_INSTALL_SNAPSHOT) {
-        *n_bufs += 1;
-    }
 
     *bufs = raft_calloc(*n_bufs, sizeof **bufs);
     if (*bufs == NULL) {
@@ -308,6 +325,11 @@ int uvEncodeMessage(const struct raft_message *message,
     if (message->type == RAFT_INSTALL_SNAPSHOT) {
         (*bufs)[1].base = message->install_snapshot.data.base;
         (*bufs)[1].len = message->install_snapshot.data.len;
+    }
+
+    if (message->type == RAFT_REQUEST_CUSTOM) {
+        (*bufs)[1].base = message->request_custom.data.base;
+        (*bufs)[1].len = message->request_custom.data.len;
     }
 
     return 0;
@@ -569,6 +591,24 @@ static void decodeTimeoutNow(const uv_buf_t *buf, struct raft_timeout_now *p)
     p->last_log_term = byteGet64(&cursor);
 }
 
+static int decodeRequestCustom(unsigned char version,
+                               const uv_buf_t *buf,
+                               struct raft_request_custom *rp)
+{
+    const uint8_t *cursor;
+
+    assert(buf != NULL);
+    assert(rp != NULL);
+
+    cursor = (void *)buf->base;
+
+    rp->version = version;
+    rp->term = byteGet64(&cursor);
+    rp->data.len = (size_t)byteGet64(&cursor);
+
+    return 0;
+}
+
 int uvDecodeMessage(uint8_t type,
                     uint8_t version,
                     const uv_buf_t *header,
@@ -609,6 +649,10 @@ int uvDecodeMessage(uint8_t type,
             break;
         case RAFT_TIMEOUT_NOW:
             decodeTimeoutNow(header, &message->timeout_now);
+            break;
+        case RAFT_REQUEST_CUSTOM:
+            decodeRequestCustom(version, header, &message->request_custom);
+            *payload_len += message->request_custom.data.len;
             break;
         default:
             rv = RAFT_IOERR;
