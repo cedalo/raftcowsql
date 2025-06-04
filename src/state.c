@@ -3,6 +3,7 @@
 #include "election.h"
 #include "queue.h"
 #include "trail.h"
+#include "progress.h"
 
 enum raft_state raft_state(struct raft *r)
 {
@@ -45,4 +46,22 @@ int raft_role(struct raft *r)
         return -1;
     }
     return local->role;
+}
+
+int raft_voter_contacts(struct raft* r)
+{
+	if (raft_state(r) != RAFT_LEADER) {
+		return -1;
+	}
+
+	int voter_contacts = 0; /* N. of voters with recent contact */
+	unsigned i;
+
+	for (i = 0; i < r->configuration.n; i++) {
+		if (progressIsOnline(r, i)){
+			voter_contacts += 1;
+		}
+	}
+
+	return voter_contacts;
 }

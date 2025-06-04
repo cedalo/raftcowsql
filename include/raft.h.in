@@ -1175,6 +1175,11 @@ RAFT_API int raft_role(struct raft *r);
 RAFT_API void raft_leader(struct raft *r, raft_id *id, const char **address);
 
 /**
+ * In the leader return the number of online voters
+ */
+RAFT_API int raft_voter_contacts(struct raft *r);
+
+/**
  * Return the index of the last entry that was appended to the local log.
  */
 RAFT_API raft_index raft_last_index(struct raft *r);
