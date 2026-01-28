@@ -13,10 +13,12 @@
 
 static int fsmApply(struct raft_fsm *fsm,
                     const struct raft_buffer *buf,
+                    raft_term term,
                     void **result)
 {
     (void)fsm;
     (void)buf;
+    (void)term;
     (void)result;
     return 0;
 }

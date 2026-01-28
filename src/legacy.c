@@ -883,12 +883,13 @@ static struct request *legacyGetRequest(struct raft *r,
 /* Apply a RAFT_COMMAND entry that has been committed. */
 static int applyCommand(struct raft *r,
                         const raft_index index,
-                        const struct raft_buffer *buf)
+                        const struct raft_buffer *buf,
+                        raft_term term)
 {
     struct raft_apply *req;
     void *result;
     int rv;
-    rv = r->fsm->apply(r->fsm, buf, &result);
+    rv = r->fsm->apply(r->fsm, buf, term, &result);
     if (rv != 0) {
         return rv;
     }
@@ -968,7 +969,7 @@ static int legacyApply(struct raft *r,
 
         switch (entry->type) {
             case RAFT_COMMAND:
-                rv = applyCommand(r, index, &entry->buf);
+                rv = applyCommand(r, index, &entry->buf, entry->term);
                 break;
             case RAFT_BARRIER:
                 applyBarrier(r, index);
