@@ -17,8 +17,10 @@ enum { SET_X = 1, SET_Y, ADD_X, ADD_Y };
 
 static int fsmApply(struct raft_fsm *fsm,
                     const struct raft_buffer *buf,
+                    raft_term term,
                     void **result)
 {
+    (void)term;
     struct fsm *f = fsm->data;
     const uint8_t *cursor = buf->base;
     unsigned command;

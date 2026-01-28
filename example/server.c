@@ -26,8 +26,10 @@ struct Fsm
 
 static int FsmApply(struct raft_fsm *fsm,
                     const struct raft_buffer *buf,
+                    raft_term term,
                     void **result)
 {
+    (void)term;
     struct Fsm *f = fsm->data;
     if (buf->len != 8) {
         return RAFT_MALFORMED;
