@@ -470,6 +470,9 @@ static int stepReceive(struct raft *r, struct raft_message *message)
         case RAFT_TIMEOUT_NOW:
             desc = "timeout now";
             break;
+        case RAFT_REQUEST_CUSTOM:
+            desc = "custom request";
+            break;
         default:
             desc = "unknown message";
             break;

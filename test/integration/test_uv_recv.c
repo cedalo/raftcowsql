@@ -112,6 +112,8 @@ static void recvCb(struct raft_io *io, struct raft_message *m1)
             munit_assert_int(m1->timeout_now.last_log_term, ==,
                              m2->timeout_now.last_log_term);
             break;
+        case RAFT_REQUEST_CUSTOM:
+            break;
     };
     result->done = true;
 }
