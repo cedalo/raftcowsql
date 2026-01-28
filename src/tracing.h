@@ -33,6 +33,9 @@ typedef void (*raft_tracer_emit)(struct raft_tracer *t,
         }                                     \
     } while (0)
 
+/* Emit warning message with the given traces at level 2 */
+#define Warnf(TRACER, ...) Logf(TRACER, 2, __VA_ARGS__)
+
 /* Emit a diagnostic message with the given tracer at level 3. */
 #define Infof(TRACER, ...) Logf(TRACER, 3, __VA_ARGS__)
 

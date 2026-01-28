@@ -11,6 +11,7 @@
 #include "tracing.h"
 
 #define tracef(...) Tracef(r->tracer, __VA_ARGS__)
+#define warnf(...) Warnf(r->tracer, __VA_ARGS__)
 
 struct legacySendMessage
 {
@@ -561,22 +562,32 @@ static bool legacyShouldTakeSnapshot(const struct raft *r)
         return false;
     }
 
-    /* If a snapshot is already in progress or we're installing a snapshot, we
-     * don't want to start another one. */
-    if (r->legacy.snapshot_taking || r->snapshot.installing) {
-        return false;
-    };
-
     /* If we didn't reach the threshold yet, do nothing. */
     if (r->commit_index - r->legacy.log->snapshot.last_index <
         r->legacy.snapshot_threshold) {
         return false;
     }
 
+    /* If a snapshot is already in progress or we're installing a snapshot, we
+     * don't want to start another one. */
+    if (r->legacy.snapshot_taking || r->snapshot.installing) {
+        warnf(
+            "snapshot currently blocked: snapshot_taking=%s, "
+            "snapshot.installing=%s",
+            r->legacy.snapshot_taking ? "true" : "false",
+            r->snapshot.installing ? "true" : "false");
+        return false;
+    };
+
     /* If the last committed index is not anymore in our log, it means that the
      * log got truncated because we have received an InstallSnapshot
      * message. Don't take a snapshot now.*/
     if (logTermOf(r->legacy.log, r->commit_index) == 0) {
+        warnf(
+            "snapshot blocked: commit_index=%llu, offset=%llu, "
+            "snapshot.last_index=%llu, logLastIndex=%llu",
+            r->commit_index, r->legacy.log->offset,
+            r->legacy.log->snapshot.last_index, logLastIndex(r->legacy.log));
         return false;
     }
 
