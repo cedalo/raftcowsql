@@ -342,7 +342,7 @@ static int uvSnapshotLoadData(struct uv *uv,
         rv = Decompress(buf, &decompressed, errmsg);
         tracef("snapshot decompress end %d", rv);
         if (rv != 0) {
-            tracef("decompress failed rv:%d", rv);
+            tracef("decompress failed rv:%d, %s", rv, errmsg);
             goto err_after_read_file;
         }
         RaftHeapFree(buf.base);
@@ -511,7 +511,7 @@ static void uvSnapshotPutWorkCb(uv_work_t *work)
     rv = UvFsFinalizeTempFile(put->snapshot_fd, uv->dir, snapshot, put->errmsg);
     tracef("snapshot write end %d", rv);
     if (rv != 0) {
-        tracef("snapshot creation failed %d", rv);
+        tracef("snapshot creation failed %d: %s", rv, put->errmsg);
         ErrMsgWrapf(put->errmsg, "finalize %s", snapshot);
         UvFsRemoveFile(uv->dir, metadata, errmsg);
         UvFsRemoveFile(uv->dir, snapshot, errmsg);
@@ -665,7 +665,8 @@ static void uvSnapshotPutAfterWorkAllocateCb(uv_work_t *work, int status)
     if (put->status != 0) {
         assert(uv->snapshot_put_retry.data == uv);
         uv->snapshot_put_retry.data = put;
-        tracef("retry snapshot write");
+        tracef("retry snapshot write due to status=%d: %s", put->status,
+               put->errmsg);
         rv = uv_timer_start(&uv->snapshot_put_retry, uvSnapshotPutRetryTimerCb,
                             uv->disk_retry, 0);
         assert(rv == 0);

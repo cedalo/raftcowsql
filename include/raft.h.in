@@ -643,6 +643,7 @@ struct raft; /* Forward declaration. */
         bool snapshot_taking;              /* True when taking a snapshot */   \
         bool snapshot_install;             /* True if installing a snapshot */ \
         void *snapshot_pending;            /* Pending install snapshot */      \
+        unsigned snapshot_blocked;         /* Subsequent snapshots blocked */  \
         struct raft_log *log;              /* Cache on-disk log */             \
         unsigned snapshot_threshold;       /* N. of entries before snapshot */ \
         unsigned snapshot_trailing;        /* N. of entries to retain */       \

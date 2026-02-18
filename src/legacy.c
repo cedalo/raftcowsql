@@ -548,7 +548,7 @@ static int putSnapshot(struct legacyTakeSnapshot *req)
     return rv;
 }
 
-static bool legacyShouldTakeSnapshot(const struct raft *r)
+static bool legacyShouldTakeSnapshot(struct raft *r)
 {
     /* We currently support only synchronous FSMs, where entries are applied
      * synchronously as soon as we advance the commit index, so the two
@@ -571,13 +571,20 @@ static bool legacyShouldTakeSnapshot(const struct raft *r)
     /* If a snapshot is already in progress or we're installing a snapshot, we
      * don't want to start another one. */
     if (r->legacy.snapshot_taking || r->snapshot.installing) {
-        warnf(
-            "snapshot currently blocked: snapshot_taking=%s, "
-            "snapshot.installing=%s",
-            r->legacy.snapshot_taking ? "true" : "false",
-            r->snapshot.installing ? "true" : "false");
+        if (r->legacy.snapshot_blocked == 0) {
+            warnf(
+                "snapshot currently blocked: snapshot_taking=%s, "
+                "snapshot.installing=%s",
+                r->legacy.snapshot_taking ? "true" : "false",
+                r->snapshot.installing ? "true" : "false");
+        }
+        ++r->legacy.snapshot_blocked;
         return false;
-    };
+    } else if (r->legacy.snapshot_blocked != 0) {
+        warnf("snapshot currently blocked message suppressed %d times",
+              r->legacy.snapshot_blocked - 1);
+        r->legacy.snapshot_blocked = 0;
+    }
 
     /* If the last committed index is not anymore in our log, it means that the
      * log got truncated because we have received an InstallSnapshot
@@ -1802,3 +1809,4 @@ void raft_set_snapshot_trailing(struct raft *r, unsigned n)
 }
 
 #undef tracef
+#undef warnf
