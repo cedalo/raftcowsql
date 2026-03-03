@@ -572,7 +572,7 @@ static bool legacyShouldTakeSnapshot(struct raft *r)
      * don't want to start another one. */
     if (r->legacy.snapshot_taking || r->snapshot.installing) {
         if (r->legacy.snapshot_blocked == 0) {
-            warnf(
+            tracef(
                 "snapshot currently blocked: snapshot_taking=%s, "
                 "snapshot.installing=%s",
                 r->legacy.snapshot_taking ? "true" : "false",
@@ -581,8 +581,8 @@ static bool legacyShouldTakeSnapshot(struct raft *r)
         ++r->legacy.snapshot_blocked;
         return false;
     } else if (r->legacy.snapshot_blocked != 0) {
-        warnf("snapshot currently blocked message suppressed %d times",
-              r->legacy.snapshot_blocked - 1);
+        tracef("snapshot currently blocked message suppressed %d times",
+               r->legacy.snapshot_blocked - 1);
         r->legacy.snapshot_blocked = 0;
     }
 
