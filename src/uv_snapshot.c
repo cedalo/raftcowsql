@@ -489,32 +489,33 @@ static void uvSnapshotPutWorkCb(uv_work_t *work)
 {
     struct uvSnapshotPut *put = work->data;
     struct uv *uv = put->uv;
-    char metadata[UV__FILENAME_LEN];
     char snapshot[UV__FILENAME_LEN];
+    char metadata[UV__FILENAME_LEN];
     char errmsg[RAFT_ERRMSG_BUF_SIZE];
     int rv;
 
+    sprintf(snapshot, UV__SNAPSHOT_TEMPLATE, put->snapshot->term,
+            put->snapshot->index, put->meta.timestamp);
     sprintf(metadata, UV__SNAPSHOT_META_TEMPLATE, put->snapshot->term,
             put->snapshot->index, put->meta.timestamp);
 
-    rv = UvFsFinalizeTempFile(put->meta.fd, uv->dir, metadata, put->errmsg);
+    /* Write snapshot first to make sure there never exists a metadata file
+                         without a valid snapshot file */
+    rv = UvFsFinalizeTempFile(uv->dir, snapshot, put->errmsg);
     if (rv != 0) {
-        ErrMsgWrapf(put->errmsg, "finalize %s", metadata);
-        tracef("snapshot.meta creation failed: %s", put->errmsg);
+        tracef("snapshot creation failed: %s", put->errmsg);
+        ErrMsgWrapf(put->errmsg, "finalize %s", snapshot);
+        UvFsRemoveTempFile(uv->dir, metadata, errmsg);
+        UvFsRemoveTempFile(uv->dir, snapshot, errmsg);
         put->status = RAFT_IOERR;
         return;
     }
 
-    sprintf(snapshot, UV__SNAPSHOT_TEMPLATE, put->snapshot->term,
-            put->snapshot->index, put->meta.timestamp);
-
-    rv = UvFsFinalizeTempFile(put->snapshot_fd, uv->dir, snapshot, put->errmsg);
+    rv = UvFsFinalizeTempFile(uv->dir, metadata, put->errmsg);
     tracef("snapshot write end %d", rv);
     if (rv != 0) {
-        tracef("snapshot creation failed %d: %s", rv, put->errmsg);
-        ErrMsgWrapf(put->errmsg, "finalize %s", snapshot);
-        UvFsRemoveFile(uv->dir, metadata, errmsg);
         UvFsRemoveFile(uv->dir, snapshot, errmsg);
+        UvFsRemoveTempFile(uv->dir, metadata, errmsg);
         put->status = RAFT_IOERR;
         return;
     }
@@ -607,16 +608,24 @@ static void uvSnapshotPutWorkAllocateCb(uv_work_t *work)
     struct uvSnapshotPut *put = work->data;
     struct uv *uv = put->uv;
     const struct raft_snapshot *snapshot = put->snapshot;
+    char tmp_metadata[UV__FILENAME_LEN];
+    char tmp_snapshot[UV__FILENAME_LEN];
     int rv;
 
-    rv = UvFsCreateTempFile(uv->dir, put->meta.bufs, 2, &put->meta.fd,
+    sprintf(tmp_metadata, UV__SNAPSHOT_META_TEMPLATE, put->snapshot->term,
+            put->snapshot->index, put->meta.timestamp);
+
+    rv = UvFsCreateTempFile(uv->dir, tmp_metadata, put->meta.bufs, 2,
                             put->errmsg);
     if (rv != 0) {
         goto abort;
     }
 
-    rv = UvFsCreateTempFile(uv->dir, snapshot->bufs, snapshot->n_bufs,
-                            &put->snapshot_fd, put->errmsg);
+    sprintf(tmp_snapshot, UV__SNAPSHOT_TEMPLATE, put->snapshot->term,
+            put->snapshot->index, put->meta.timestamp);
+
+    rv = UvFsCreateTempFile(uv->dir, tmp_snapshot, snapshot->bufs,
+                            snapshot->n_bufs, put->errmsg);
     if (rv != 0) {
         goto abort_after_meta_open;
     }

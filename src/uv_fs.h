@@ -10,6 +10,7 @@
 
 #define TMP_FILE_PREFIX "tmp-"
 #define TMP_FILE_FMT TMP_FILE_PREFIX "%s"
+#define TMP_FILENAME_LEN (UV__FILENAME_LEN + 4)
 
 /* Check that the given directory can be used. */
 int UvFsCheckDir(const char *dir, char *errmsg);
@@ -43,19 +44,19 @@ int UvFsAllocateFile(const char *dir,
                      uv_file *fd,
                      char *errmsg);
 
-/* Allocate and write an invisible temporary file of the given size within the
- * given directory, returning its file descriptor. */
+/* Allocate and write temporary file of the given size within the
+ * given directory. */
 int UvFsCreateTempFile(const char *dir,
+                       const char *filename,
                        struct raft_buffer *bufs,
                        unsigned n_bufs,
-                       uv_file *fd,
                        char *errmsg);
 
-/* Finalize an invisible tempfile renaming it to the given name. */
-int UvFsFinalizeTempFile(uv_file fd,
-                         const char *dir,
-                         const char *filename,
-                         char *errmsg);
+/* Finalize an tempfile renaming it to the given name. */
+int UvFsFinalizeTempFile(const char *dir, const char *filename, char *errmsg);
+
+/* Synchronously remove a tempfile file, calling the unlink() system call. */
+int UvFsRemoveTempFile(const char *dir, const char *filename, char *errmsg);
 
 /* Create a file and write the given content into it. */
 int UvFsMakeFile(const char *dir,

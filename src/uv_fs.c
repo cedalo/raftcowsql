@@ -234,32 +234,54 @@ err:
     return rv;
 }
 
+static int UvFsTempFilename(const char *filename,
+                            char *tmp_filename,
+                            size_t tmp_filename_len)
+{
+    int rv;
+
+    /* Create a temp file with the given content
+     * TODO as of libuv 1.34.0, use `uv_fs_mkstemp` */
+    rv = snprintf(tmp_filename, tmp_filename_len, TMP_FILE_FMT, filename);
+    if (rv < 0 || rv >= (int)tmp_filename_len) {
+        return RAFT_INVALID;
+    }
+    return 0;
+}
+
 int UvFsCreateTempFile(const char *dir,
+                       const char *filename,
                        struct raft_buffer *bufs,
                        unsigned n_bufs,
-                       uv_file *fd,
                        char *errmsg)
 {
+    char tmp_filename[TMP_FILENAME_LEN] = {0};
     unsigned i;
     size_t size = 0;
+    uv_file fd;
     int rv;
+
+    rv = UvFsTempFilename(filename, tmp_filename, sizeof(tmp_filename));
+    if (rv != 0) {
+        return rv;
+    }
 
     for (i = 0; i < n_bufs; i++) {
         size += bufs[i].len;
     }
 
-    rv = uvFsOpenFile(dir, "", O_TMPFILE | O_WRONLY, S_IRUSR | S_IWUSR, fd,
-                      errmsg);
+    rv = uvFsOpenFile(dir, tmp_filename, UV_FS_O_WRONLY | UV_FS_O_CREAT,
+                      S_IRUSR | S_IWUSR, &fd, errmsg);
     if (rv != 0) {
         goto err;
     }
 
-    rv = uvFsAllocate(*fd, size, errmsg);
+    rv = uvFsAllocate(fd, size, errmsg);
     if (rv != 0) {
         goto err_after_open;
     }
 
-    rv = UvOsWrite(*fd, (const uv_buf_t *)bufs, n_bufs, 0);
+    rv = UvOsWrite(fd, (const uv_buf_t *)bufs, n_bufs, 0);
     if (rv != (int)(size)) {
         if (rv < 0) {
             UvOsErrMsg(errmsg, "write", rv);
@@ -270,43 +292,11 @@ int UvFsCreateTempFile(const char *dir,
         goto err_after_open;
     }
 
-    rv = UvOsFsync(*fd);
+    rv = UvOsFsync(fd);
     if (rv != 0) {
         UvOsErrMsg(errmsg, "fsync", rv);
         rv = RAFT_IOERR;
         goto err_after_open;
-    }
-
-    return 0;
-
-err_after_open:
-    UvOsClose(*fd);
-err:
-    assert(rv != 0);
-    return rv;
-}
-
-int UvFsFinalizeTempFile(uv_file fd,
-                         const char *dir,
-                         const char *filename,
-                         char *errmsg)
-{
-    char path[UV__PATH_SZ];
-    char procpath[PATH_MAX];
-    int rv;
-
-    rv = UvOsJoin(dir, filename, path);
-    if (rv != 0) {
-        rv = RAFT_INVALID;
-        goto err_before_close;
-    }
-
-    snprintf(procpath, PATH_MAX, "/proc/self/fd/%d", fd);
-    rv = UvOsLinkat(AT_FDCWD, procpath, AT_FDCWD, path, AT_SYMLINK_FOLLOW);
-    if (rv != 0) {
-        UvOsErrMsg(errmsg, "linkat", rv);
-        rv = RAFT_IOERR;
-        goto err_before_close;
     }
 
     rv = UvOsClose(fd);
@@ -318,11 +308,61 @@ int UvFsFinalizeTempFile(uv_file fd,
 
     return 0;
 
-err_before_close:
+err_after_open:
     UvOsClose(fd);
 err:
     assert(rv != 0);
     return rv;
+}
+
+int UvFsFinalizeTempFile(const char *dir, const char *filename, char *errmsg)
+{
+    char tmp_filename[TMP_FILENAME_LEN] = {0};
+    char tmp_path[UV__PATH_SZ];
+    char path[UV__PATH_SZ];
+    int rv;
+
+    rv = UvFsTempFilename(filename, tmp_filename, sizeof(tmp_filename));
+    if (rv != 0) {
+        return rv;
+    }
+
+    rv = UvOsJoin(dir, tmp_filename, tmp_path);
+    if (rv != 0) {
+        rv = RAFT_INVALID;
+        goto err;
+    }
+
+    rv = UvOsJoin(dir, filename, path);
+    if (rv != 0) {
+        rv = RAFT_INVALID;
+        goto err;
+    }
+
+    rv = UvOsRename(tmp_path, path);
+    if (rv != 0) {
+        UvOsErrMsg(errmsg, "rename", rv);
+        goto err;
+    }
+
+    return 0;
+
+err:
+    assert(rv != 0);
+    return rv;
+}
+
+int UvFsRemoveTempFile(const char *dir, const char *filename, char *errmsg)
+{
+    char tmp_filename[TMP_FILENAME_LEN] = {0};
+    int rv;
+
+    rv = UvFsTempFilename(filename, tmp_filename, sizeof(tmp_filename));
+    if (rv != 0) {
+        return rv;
+    }
+
+    return UvFsRemoveFile(dir, tmp_filename, errmsg);
 }
 
 static int uvFsWriteFile(const char *dir,
@@ -378,17 +418,15 @@ int UvFsMakeFile(const char *dir,
                  char *errmsg)
 {
     int rv;
-    char tmp_filename[UV__FILENAME_LEN + 1] = {0};
+    char tmp_filename[TMP_FILENAME_LEN] = {0};
     char path[UV__PATH_SZ] = {0};
     char tmp_path[UV__PATH_SZ] = {0};
 
-    /* Create a temp file with the given content
-     * TODO as of libuv 1.34.0, use `uv_fs_mkstemp` */
-    size_t sz = sizeof(tmp_filename);
-    rv = snprintf(tmp_filename, sz, TMP_FILE_FMT, filename);
-    if (rv < 0 || rv >= (int)sz) {
+    rv = UvFsTempFilename(filename, tmp_filename, sizeof(tmp_filename));
+    if (rv != 0) {
         return rv;
     }
+
     int flags = UV_FS_O_WRONLY | UV_FS_O_CREAT | UV_FS_O_EXCL;
     rv = uvFsWriteFile(dir, tmp_filename, flags, bufs, n_bufs, errmsg);
     if (rv != 0) {
