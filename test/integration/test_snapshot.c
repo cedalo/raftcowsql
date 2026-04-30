@@ -1,3 +1,4 @@
+#include "../../src/progress.h"
 #include "../lib/cluster.h"
 #include "../lib/runner.h"
 
@@ -659,6 +660,101 @@ TEST(snapshot, NewTermWhileInstalling, setUp, tearDown, 0, NULL)
         "[ 260] 3 > recv append entries from server 2\n"
         "           remote term is higher (3 vs 2) -> bump term\n"
         "           snapshot install in progress -> ignore\n");
+
+    return MUNIT_OK;
+}
+
+/* With a short heartbeat timeout, a snapshot send should not be re-initiated
+ * on every heartbeat tick while a previous snapshot load/send is still in
+ * flight. Before the fix, progressAbortSnapshot() (via the
+ * install_snapshot_timeout path in progressShouldReplicate) would reset the
+ * progress state to PROBE, and the very next replicationProgress() call would
+ * invoke sendSnapshot() again since the follower was online. With a 10ms
+ * heartbeat this happened on every tick, sending dozens of concurrent
+ * RAFT_INSTALL_SNAPSHOT messages to the follower. A second message arriving
+ * while the follower still has s->snapshot.installing == true triggers an
+ * assertion failure (crash). The fix guards sendSnapshot() with a check
+ * against snapshot.last_send so no new snapshot is sent within
+ * install_snapshot_timeout of the previous one. */
+TEST(snapshot, NoRepeatSendDuringInstall, setUp, tearDown, 0, NULL)
+{
+    struct fixture *f = data;
+    struct raft *r1;
+    raft_time last_snapshot_send;
+    unsigned n_snapshot_sends;
+    unsigned step;
+
+    /* Server 1 has a snapshot at index 2. */
+    CLUSTER_SET_TERM(1 /* ID */, 2 /* term */);
+    CLUSTER_SET_SNAPSHOT(1, /* ID           */
+                         2, /* last index   */
+                         2, /* last term    */
+                         2, /* N servers    */
+                         2, /* N voting     */
+                         1 /* conf index   */);
+    CLUSTER_START(1 /* ID */);
+
+    /* Server 2 has only the initial configuration entry. */
+    CLUSTER_SET_TERM(2, 1 /* term */);
+    CLUSTER_ADD_ENTRY(2, RAFT_CHANGE, 2 /* servers */, 2 /* voters */);
+    CLUSTER_START(2 /* ID */);
+
+    /* Give server 2 a high disk latency (120ms) so it does not finish
+     * installing the snapshot before install_snapshot_timeout (50ms) fires. */
+    CLUSTER_SET_DISK_LATENCY(2, 120);
+
+    /* Keep server 2's election timer high enough that it won't time out
+     * and disrupt the test. */
+    raft_set_election_timeout(CLUSTER_RAFT(2), 500);
+
+    /* Use a short heartbeat timeout so that multiple heartbeat ticks fire
+     * within the install_snapshot_timeout window.  Without the fix each tick
+     * after the first timeout-abort would call sendSnapshot() again, sending
+     * a second RAFT_INSTALL_SNAPSHOT while server 2 is still installing,
+     * which crashes the cluster framework via munit_assert_false(installing).
+     * With the fix every tick within the window sends a heartbeat instead,
+     * and the snapshot is retried only once at t=190 when the 50ms timeout
+     * expires. */
+    raft_set_heartbeat_timeout(CLUSTER_RAFT(1), 10);
+
+    /* Advance until server 1 becomes leader. */
+    CLUSTER_TRACE(
+        "[   0] 1 > term 2, 1 snapshot (2^2)\n"
+        "[   0] 2 > term 1, 1 entry (1^1)\n"
+        "[ 100] 1 > timeout as follower\n"
+        "           convert to candidate, start election for term 3\n"
+        "[ 110] 2 > recv request vote from server 1\n"
+        "           remote term is higher (3 vs 1) -> bump term\n"
+        "           remote log is more recent (2^2 vs 1^1) -> grant vote\n"
+        "[ 120] 1 > recv request vote result from server 2\n"
+        "           quorum reached with 2 votes out of 2 -> convert to leader\n"
+        "           probe server 2 sending a heartbeat (no entries)\n");
+
+    /* Now track snapshot.last_send to count how many times sendSnapshot() is
+     * called.  With the fix it must be at most 2: the initial send and one
+     * legitimate install_snapshot_timeout retry. */
+    r1 = CLUSTER_RAFT(1);
+    last_snapshot_send = r1->leader_state.progress[1].snapshot.last_send;
+    n_snapshot_sends = 0;
+
+    /* Step until we have passed t=300 to cover the full installation window. */
+    for (step = 0; step < 500; step++) {
+        raft_time cur = r1->leader_state.progress[1].snapshot.last_send;
+        if (cur != last_snapshot_send) {
+            n_snapshot_sends++;
+            last_snapshot_send = cur;
+        }
+        if (f->cluster_.time > 300) {
+            break;
+        }
+        test_cluster_step(&f->cluster_);
+    }
+
+    /* Without the fix, sendSnapshot() is called on each abort-and-retry cycle
+     * (4 times over the 120ms install window). With the fix the guard prevents
+     * re-sends within install_snapshot_timeout so at most 2 sends occur:
+     * the initial send and one legitimate retry when the timeout expires. */
+    munit_assert_uint(n_snapshot_sends, <=, 2);
 
     return MUNIT_OK;
 }

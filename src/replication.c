@@ -228,7 +228,24 @@ int replicationProgress(struct raft *r, unsigned i)
         assert(snapshot_index > 0);
 
         if (!progress_state_is_snapshot && progressIsOnline(r, i)) {
-            return sendSnapshot(r, i);
+            /* Don't initiate a new snapshot send if one is already in flight.
+             * progressAbortSnapshot() can reset the state back to PROBE (e.g.
+             * from checkContactQuorum when the follower hasn't replied yet)
+             * while the async snapshot load/send is still pending. With a short
+             * heartbeat_timeout this loop fires repeatedly, each time queuing
+             * another snapshot_get disk read, exhausting memory. Guard against
+             * this by checking whether we sent a snapshot recently enough that
+             * it is likely still in flight. */
+            raft_time last_snapshot_send =
+                r->leader_state.progress[i].snapshot.last_send;
+            if (last_snapshot_send != ULLONG_MAX &&
+                r->now - last_snapshot_send < r->install_snapshot_timeout) {
+                /* A snapshot send is still in flight; send a heartbeat instead
+                 * so the follower stays informed of the leader while we wait.
+                 */
+            } else {
+                return sendSnapshot(r, i);
+            }
         }
 
         /* Set the next index to the snapshot index + 1, so when we receive
