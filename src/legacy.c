@@ -529,8 +529,8 @@ static void takeSnapshotCb(struct raft_io_snapshot_put *put, int status)
     if (r->legacy.snapshot_pending != NULL) {
         struct legacyPersistSnapshot *persist;
         int rv;
-        r->legacy.snapshot_pending = NULL;
         persist = r->legacy.snapshot_pending;
+        r->legacy.snapshot_pending = NULL;
         rv = legacyPersistSnapshotStart(persist);
         assert(rv == 0);
     }
