@@ -1747,10 +1747,8 @@ TEST(replication, LastStoredLaggingBehindCommitIndex, setUp, tearDown, 0, NULL)
         "           remote term is higher (4 vs 3) -> bump term, step down\n"
         "           remote log is equal (3^2) -> grant vote\n"
         "[ 220] 1 > timeout as leader\n"
-        "           server 2 is unreachable -> abort pipeline\n"
-        "           server 3 is unreachable -> abort pipeline\n"
-        "           probe server 2 sending a heartbeat (no entries)\n"
-        "           probe server 3 sending a heartbeat (no entries)\n"
+        "           pipeline server 2 sending a heartbeat (no entries)\n"
+        "           pipeline server 3 sending a heartbeat (no entries)\n"
         "[ 230] 2 > recv request vote result from server 3\n"
         "           quorum reached with 2 votes out of 3 -> convert to leader\n"
         "           replicate 1 new barrier entry (4^4)\n"
@@ -1779,9 +1777,8 @@ TEST(replication, LastStoredLaggingBehindCommitIndex, setUp, tearDown, 0, NULL)
     CLUSTER_TRACE(
         "[ 270] 2 > timeout as leader\n"
         "[ 280] 2 > timeout as leader\n"
-        "           server 3 is unreachable -> abort pipeline\n"
         "           probe server 1 sending 1 entry (4^4)\n"
-        "           probe server 3 sending a heartbeat (no entries)\n"
+        "           pipeline server 3 sending a heartbeat (no entries)\n"
         "[ 290] 1 > recv append entries from server 2\n"
         "           no new entries to persist\n");
 
