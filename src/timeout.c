@@ -130,7 +130,14 @@ static int timeoutCandidate(struct raft *r)
  *
  * For each server the function checks the recent_recv flag of the associated
  * progress object, and resets the flag after the check. It returns true if a
- * majority of voting server had the flag set to true. */
+ * majority of voting server had the flag set to true.
+ *
+ * If a server is *offline* we abort any pipeline or snapshot replication.
+ * is_recent uses the time since the last tick, which is reset every
+ * heartbeat_timeout, so more likely to trigger.
+ * is_online on the other hand uses the election timeout which is much bigger
+ * and less sensitive to timing jitter.
+ */
 static bool checkContactQuorum(struct raft *r)
 {
     unsigned i;
@@ -140,13 +147,14 @@ static bool checkContactQuorum(struct raft *r)
     for (i = 0; i < r->configuration.n; i++) {
         struct raft_server *server = &r->configuration.servers[i];
         bool is_recent = progressHasContactedRecently(r, i);
+        bool is_online = progressIsOnline(r, i);
 
         if ((server->role == RAFT_VOTER && is_recent) || server->id == r->id) {
             contacts++;
         }
         r->voter_contacts = (int)contacts;
 
-        if (!is_recent) {
+        if (!is_online) {
             switch (progressState(r, i)) {
                 case PROGRESS__PIPELINE:
                     infof("server %llu is unreachable -> abort pipeline",
