@@ -96,6 +96,14 @@ AS_IF([test x"$have_zfs" = x"yes"],
    ],
    [])
 
+# Linux kernel >= 6.6 added support for O_DIRECT on tmpfs (previously
+# tmpfs never supported it). Detect this at configure time so that the
+# UvFsProbeCapabilities/tmpfs unit test can assert the value that
+# UvFsProbeCapabilities() will actually observe on this kernel, rather than
+# hard-coding the old, now platform-dependent, behaviour.
+AX_COMPARE_VERSION($(uname -r | cut -f 1 -d -), [ge], [6.6],
+    [AC_DEFINE(RAFT_HAVE_TMPFS_WITH_DIRECT_IO)], [])
+
 # Checks for typedefs, structures, and compiler characteristics.
 AC_TYPE_SIZE_T
 AC_TYPE_SSIZE_T

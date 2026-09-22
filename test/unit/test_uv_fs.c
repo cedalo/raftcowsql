@@ -270,10 +270,19 @@ SUITE(UvFsProbeCapabilities)
 TEST(UvFsProbeCapabilities, tmpfs, DirTmpfsSetUp, DirTearDown, 0, NULL)
 {
     const char *dir = data;
+    size_t direct_io = 0;
+    /* Linux kernel >= 6.6 added support for O_DIRECT on tmpfs: on such
+     * kernels UvFsProbeCapabilities() will successfully probe a direct I/O
+     * block size instead of falling back to the legacy "tmpfs never
+     * supports O_DIRECT" special case. See the RAFT_HAVE_TMPFS_WITH_DIRECT_IO
+     * check in configure.ac. */
+#if defined(RAFT_HAVE_TMPFS_WITH_DIRECT_IO)
+    direct_io = 4096;
+#endif
     if (dir == NULL) {
         return MUNIT_SKIP;
     }
-    PROBE_CAPABILITIES(dir, 0, false);
+    PROBE_CAPABILITIES(dir, direct_io, false);
     return MUNIT_OK;
 }
 
