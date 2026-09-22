@@ -1587,6 +1587,57 @@ TEST(replication, ReceiveResultWithHigherTerm, setUp, tearDown, 0, NULL)
     return MUNIT_OK;
 }
 
+/* Check whether a server with a higher term prevents cluster recovery */
+TEST(replication,
+     StaleHigherTermDoesNotPreventRecovery,
+     setUp,
+     tearDown,
+     0,
+     NULL)
+{
+    struct fixture *f = data;
+    unsigned id;
+
+    /* Configure servers 1 and 2 as up to date nodes */
+    for (id = 1; id <= 2; id++) {
+        CLUSTER_SET_TERM(id, 1 /* term */);
+        CLUSTER_ADD_ENTRY(id, RAFT_CHANGE, 3 /* servers */, 3 /* voters */);
+        CLUSTER_ADD_ENTRY(id, RAFT_COMMAND, 1 /* term */, 123 /* payload */);
+        CLUSTER_START(id);
+    }
+
+    /* Configure server 3 with a massive term, but a commit index behind the
+     * legit cluster */
+    CLUSTER_SET_TERM(3, 1000 /* term */);
+    CLUSTER_ADD_ENTRY(3, RAFT_CHANGE, 3 /* servers */, 3 /* voters */);
+    CLUSTER_START(3);
+
+    munit_assert_ulong(raft_current_term(CLUSTER_RAFT(3)), ==, 1000);
+    munit_assert_ulong(raft_last_index(CLUSTER_RAFT(1)), ==, 2);
+    munit_assert_ulong(raft_last_index(CLUSTER_RAFT(3)), ==, 1);
+
+    /* Run the cluster - nodes 1 and 2 will repeatedly get disrupted by node 3
+     * until the term of 1 and 2 catches up with 3.
+     */
+    CLUSTER_ELAPSE(400);
+
+    munit_assert_true(raft_state(CLUSTER_RAFT(1)) == RAFT_LEADER ||
+                      raft_state(CLUSTER_RAFT(2)) == RAFT_LEADER);
+    munit_assert_int(raft_state(CLUSTER_RAFT(3)), !=, RAFT_LEADER);
+
+    munit_assert_ulong(raft_current_term(CLUSTER_RAFT(1)), >, 1000);
+    munit_assert_ulong(raft_current_term(CLUSTER_RAFT(2)), >, 1000);
+    munit_assert_ulong(raft_current_term(CLUSTER_RAFT(3)), >, 1000);
+
+    /* Node 3 should have joined back again with the same number of commits. */
+    munit_assert_int(raft_state(CLUSTER_RAFT(3)), ==, RAFT_FOLLOWER);
+    munit_assert_ulong(raft_last_index(CLUSTER_RAFT(3)), >, 2);
+    munit_assert_ulong(raft_last_index(CLUSTER_RAFT(3)), ==,
+                       raft_last_index(CLUSTER_RAFT(1)));
+
+    return MUNIT_OK;
+}
+
 /* A leader with slow disk commits an entry that it hasn't persisted yet,
  * because enough followers to have a majority have aknowledged that they have
  * appended the entry. The leader's last_stored field hence lags behind its

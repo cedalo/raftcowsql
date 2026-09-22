@@ -834,6 +834,156 @@ TEST(election, PreVoteNoStaleVotes, setUp, tearDown, 0, NULL)
     return MUNIT_OK;
 }
 
+/* Pre-vote only applies on the first election attempt for a candidate. If it
+ * wins the pre-vote, then any failure of the real election should trigger it
+ * to go back into pre-vote otherwise the term will be incremented without
+ * bound.
+ *
+ * This test isolates a candidate from the rest of the cluster right after it
+ * has won its pre-vote round and hence exited pre-vote. When the real election
+ * fails it goes back to pre-vote and does not increment its term.
+ */
+TEST(election, PreVoteBoundsRealElectionRetries, setUp, tearDown, 0, NULL)
+{
+    struct fixture *f = data;
+    unsigned id;
+
+    /* Bootstrap a cluster with 3 servers, all voters with pre-vote enabled. */
+    for (id = 1; id <= 3; id++) {
+        CLUSTER_SET_TERM(id, 1 /* term */);
+        raft_set_pre_vote(CLUSTER_RAFT(id), true);
+        CLUSTER_ADD_ENTRY(id, RAFT_CHANGE, 3 /* servers */, 3 /* voters */);
+        CLUSTER_START(id);
+    }
+
+    /* Give servers 2 and 3 a very long election timeout, so that only server 1
+     * ever times out during this test */
+    CLUSTER_SET_ELECTION_TIMEOUT(2 /* ID */, 100000 /* timeout */,
+                                 0 /* delta */);
+    CLUSTER_SET_ELECTION_TIMEOUT(3 /* ID */, 100000 /* timeout */,
+                                 0 /* delta */);
+
+    CLUSTER_TRACE(
+        "[   0] 1 > term 1, 1 entry (1^1)\n"
+        "[   0] 2 > term 1, 1 entry (1^1)\n"
+        "[   0] 3 > term 1, 1 entry (1^1)\n");
+
+    /* Server 1 times out and starts a pre-vote round. It does not increment
+     * its term yet. */
+    CLUSTER_TRACE(
+        "[ 100] 1 > timeout as follower\n"
+        "           convert to candidate, start pre-election for term 2\n");
+    munit_assert_ulong(raft_current_term(CLUSTER_RAFT(1)), ==, 1);
+
+    /* Both peers grant pre-vote without incrementing their own term. */
+    CLUSTER_TRACE(
+        "[ 110] 2 > recv request vote from server 1\n"
+        "           remote log is equal (1^1) -> pre-vote ok\n");
+    CLUSTER_TRACE(
+        "[ 110] 3 > recv request vote from server 1\n"
+        "           remote log is equal (1^1) -> pre-vote ok\n");
+    munit_assert_ulong(raft_current_term(CLUSTER_RAFT(2)), ==, 1);
+    munit_assert_ulong(raft_current_term(CLUSTER_RAFT(3)), ==, 1);
+
+    /* Server 1 wins the pre-vote round and starts the real election,
+     * incrementing its term for the first time and exiting pre-vote
+     */
+    CLUSTER_TRACE(
+        "[ 120] 1 > recv request vote result from server 2\n"
+        "           votes quorum reached -> pre-vote successful\n"
+        "[ 120] 1 > recv request vote result from server 3\n"
+        "           receive stale pre-vote response -> ignore\n");
+    munit_assert_ulong(raft_current_term(CLUSTER_RAFT(1)), ==, 2);
+    munit_assert_false(CLUSTER_RAFT(1)->candidate_state.in_pre_vote);
+
+    /* Now fully isolate server 1 from the rest of the cluster before it
+     * receives the results of the vote.  We don't let it receive anything else
+     * for the rest of the test. */
+    CLUSTER_DISCONNECT(1, 2);
+    CLUSTER_DISCONNECT(2, 1);
+    CLUSTER_DISCONNECT(1, 3);
+    CLUSTER_DISCONNECT(3, 1);
+
+    /* The election server 1 started at t=120 never reaches quorum When its
+     * election timer fires again, it falls back to a fresh pre-vote round
+     * instead of bumping its term. */
+    CLUSTER_TRACE(
+        "[ 220] 1 > timeout as candidate\n"
+        "           stay candidate, real election did not reach quorum -> "
+        "restart with a pre-election for term 3\n");
+    munit_assert_ulong(raft_current_term(CLUSTER_RAFT(1)), ==, 2);
+    munit_assert_true(CLUSTER_RAFT(1)->candidate_state.in_pre_vote);
+
+    /* That pre-vote round can't succeed either since server 1 is still
+     * isolated. */
+    CLUSTER_TRACE(
+        "[ 320] 1 > timeout as candidate\n"
+        "           stay candidate, start pre-election for term 3\n");
+    munit_assert_ulong(raft_current_term(CLUSTER_RAFT(1)), ==, 2);
+    munit_assert_true(CLUSTER_RAFT(1)->candidate_state.in_pre_vote);
+
+    CLUSTER_TRACE(
+        "[ 420] 1 > timeout as candidate\n"
+        "           stay candidate, start pre-election for term 3\n");
+    munit_assert_ulong(raft_current_term(CLUSTER_RAFT(1)), ==, 2);
+    munit_assert_int(raft_state(CLUSTER_RAFT(1)), ==, RAFT_CANDIDATE);
+    munit_assert_true(CLUSTER_RAFT(1)->candidate_state.in_pre_vote);
+
+    /* Let the node retry lots of times, the term shouldn't change. */
+    CLUSTER_ELAPSE(2005);
+    munit_assert_ulong(raft_current_term(CLUSTER_RAFT(1)), ==, 2);
+    munit_assert_int(raft_state(CLUSTER_RAFT(1)), ==, RAFT_CANDIDATE);
+    munit_assert_true(CLUSTER_RAFT(1)->candidate_state.in_pre_vote);
+
+    /* Throw away the old trace results */
+    f->cluster_.trace[0] = 0;
+
+    /* Restore connectivity and check everything works again. */
+    CLUSTER_RECONNECT(1, 2);
+    CLUSTER_RECONNECT(2, 1);
+    CLUSTER_RECONNECT(1, 3);
+    CLUSTER_RECONNECT(3, 1);
+
+    CLUSTER_TRACE(
+        "[2520] 1 > timeout as candidate\n"
+        "           stay candidate, start pre-election for term 3\n");
+    munit_assert_ulong(raft_current_term(CLUSTER_RAFT(1)), ==, 2);
+
+    CLUSTER_TRACE(
+        "[2530] 2 > recv request vote from server 1\n"
+        "           remote log is equal (1^1) -> pre-vote ok\n");
+    CLUSTER_TRACE(
+        "[2530] 3 > recv request vote from server 1\n"
+        "           remote log is equal (1^1) -> pre-vote ok\n");
+
+    CLUSTER_TRACE(
+        "[2540] 1 > recv request vote result from server 2\n"
+        "           votes quorum reached -> pre-vote successful\n"
+        "[2540] 1 > recv request vote result from server 3\n"
+        "           receive stale pre-vote response -> ignore\n");
+    munit_assert_ulong(raft_current_term(CLUSTER_RAFT(1)), ==, 3);
+    munit_assert_false(CLUSTER_RAFT(1)->candidate_state.in_pre_vote);
+
+    CLUSTER_TRACE(
+        "[2550] 2 > recv request vote from server 1\n"
+        "           remote term is higher (3 vs 1) -> bump term\n"
+        "           remote log is equal (1^1) -> grant vote\n"
+        "[2550] 3 > recv request vote from server 1\n"
+        "           remote term is higher (3 vs 1) -> bump term\n"
+        "           remote log is equal (1^1) -> grant vote\n");
+
+    CLUSTER_TRACE(
+        "[2560] 1 > recv request vote result from server 2\n"
+        "           quorum reached with 2 votes out of 3 -> convert to leader\n"
+        "           probe server 2 sending a heartbeat (no entries)\n"
+        "           probe server 3 sending a heartbeat (no entries)\n"
+        "[2560] 1 > recv request vote result from server 3\n"
+        "           local server is leader -> ignore\n");
+    munit_assert_int(raft_state(CLUSTER_RAFT(1)), ==, RAFT_LEADER);
+
+    return MUNIT_OK;
+}
+
 /* If a follower is a stand-by, it won't convert to candidate */
 TEST(election, StayFollowerIfStandBy, setUp, tearDown, 0, NULL)
 {
