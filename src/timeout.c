@@ -91,10 +91,32 @@ static int timeoutCandidate(struct raft *r)
      *   votes could be split so that no candidate obtains a majority. When this
      *   happens, each candidate will time out and start a new election by
      *   incrementing its term and initiating another round of RequestVote RPCs
+     *
+     * Pre-vote is used to stop a candidate who joins an existing cluster from
+     * unnecessarily triggering a new election if there is already a leader.
+     * If we win the pre-vote, then candidate_state.in_pre_vote is cleared and
+     * we start a real election where the term is incremented. If that election
+     * doesn't reach quorum before our election timer triggers, we retry.
+     * However, because in_pre_vote was cleared we end up bumping the term for
+     * each retry.  Essentially it's a race-ish condition, if we transition to
+     * be a candidate and attempt to start an election but lose network at that
+     * point or the other nodes are slow to reply, then we accidentally keep on
+     * incrementing the term.  To fix it, if the election fails we re-set
+     * in_pre_vote.
      */
     if (r->now >= electionTimerExpiration(r)) {
-        infof("stay candidate, start election for term %llu",
-              r->current_term + 1);
+        if (r->pre_vote && !r->candidate_state.in_pre_vote) {
+            infof(
+                "stay candidate, real election did not reach quorum -> restart "
+                "with a pre-election for term %llu",
+                r->current_term + 1);
+            r->candidate_state.in_pre_vote = true;
+        } else {
+            const char *pre_vote_text =
+                r->candidate_state.in_pre_vote ? "pre-" : "";
+            infof("stay candidate, start %selection for term %llu",
+                  pre_vote_text, r->current_term + 1);
+        }
         electionStart(r);
     }
 
