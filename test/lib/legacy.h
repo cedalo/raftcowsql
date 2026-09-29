@@ -25,6 +25,7 @@
     do {                                                                       \
         unsigned _n = DEFAULT_N;                                               \
         bool _pre_vote = false;                                                \
+        bool _ss_async = false;                                                \
         int _fsm_version = 2;                                                  \
         unsigned _hb = 0;                                                      \
         unsigned _i;                                                           \
@@ -43,11 +44,19 @@
             _fsm_version =                                                     \
                 atoi(munit_parameters_get(params, CLUSTER_FSM_VERSION_PARAM)); \
         }                                                                      \
+        if (munit_parameters_get(params, CLUSTER_SS_ASYNC_PARAM) != NULL) {    \
+            _ss_async =                                                        \
+                atoi(munit_parameters_get(params, CLUSTER_SS_ASYNC_PARAM));    \
+        }                                                                      \
         munit_assert_int(_n, >, 0);                                            \
         _rv = raft_fixture_init(&f->cluster);                                  \
         munit_assert_int(_rv, ==, 0);                                          \
         for (_i = 0; _i < _n; _i++) {                                          \
-            FsmInit(&f->fsms[_i], _fsm_version);                               \
+            if (!_ss_async || _fsm_version < 3) {                              \
+                FsmInit(&f->fsms[_i], _fsm_version);                           \
+            } else {                                                           \
+                FsmInitAsync(&f->fsms[_i], _fsm_version);                      \
+            }                                                                  \
             _rv = raft_fixture_grow(&f->cluster, &f->fsms[_i]);                \
             munit_assert_int(_rv, ==, 0);                                      \
         }                                                                      \
@@ -84,6 +93,9 @@
 
 /* Munit parameter for setting fsm version */
 #define CLUSTER_FSM_VERSION_PARAM "fsm-version"
+
+/* Munit parameter for using an fsm taking snapshots asynchronously */
+#define CLUSTER_SS_ASYNC_PARAM "cluster-snapshot-async"
 
 /* Get the number of servers in the cluster. */
 #define CLUSTER_N raft_fixture_n(&f->cluster)

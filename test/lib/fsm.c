@@ -122,6 +122,32 @@ static int fsmSnapshot_v2(struct raft_fsm *fsm,
     return fsmEncodeSnapshot(f->x, f->y, bufs, n_bufs);
 }
 
+/* For use with fsmSnapshotAsync and fsm->version >= 3: only takes the lock,
+ * the actual encoding of the snapshot happens in fsmSnapshotAsync. */
+static int fsmSnapshotInitialize(struct raft_fsm *fsm,
+                                 struct raft_buffer *bufs[],
+                                 unsigned *n_bufs)
+{
+    (void)bufs;
+    (void)n_bufs;
+    struct fsm *f = fsm->data;
+    munit_assert_int(f->lock, ==, 0);
+    f->lock = 1;
+    munit_assert_ptr_null(f->data);
+    f->data = raft_malloc(8); /* Detect proper cleanup in finalize */
+    munit_assert_ptr_not_null(f->data);
+    return 0;
+}
+
+/* Runs outside of the main loop, for use with fsm->version >= 3. */
+static int fsmSnapshotAsync(struct raft_fsm *fsm,
+                            struct raft_buffer *bufs[],
+                            unsigned *n_bufs)
+{
+    struct fsm *f = fsm->data;
+    return fsmEncodeSnapshot(f->x, f->y, bufs, n_bufs);
+}
+
 static int fsmSnapshotFinalize(struct raft_fsm *fsm,
                                struct raft_buffer *bufs[],
                                unsigned *n_bufs)
@@ -147,8 +173,8 @@ static int fsmSnapshotFinalize(struct raft_fsm *fsm,
 
 void FsmInit(struct raft_fsm *fsm, int version)
 {
-    struct fsm *f = munit_malloc(sizeof *fsm);
-    memset(fsm, 'x', sizeof(*fsm)); /* Fill  with garbage */
+    struct fsm *f = munit_malloc(sizeof *f);
+    memset(fsm, 'x', sizeof(*f)); /* Fill  with garbage */
 
     f->x = 0;
     f->y = 0;
@@ -164,6 +190,29 @@ void FsmInit(struct raft_fsm *fsm, int version)
         fsm->snapshot = fsmSnapshot_v2;
         fsm->snapshot_finalize = fsmSnapshotFinalize;
     }
+    if (version > 2) {
+        fsm->snapshot_async = NULL;
+    }
+}
+
+void FsmInitAsync(struct raft_fsm *fsm, int version)
+{
+    munit_assert_int(version, >, 2);
+    struct fsm *f = munit_malloc(sizeof *f);
+    memset(fsm, 'x', sizeof(*f)); /* Fill  with garbage */
+
+    f->x = 0;
+    f->y = 0;
+    f->lock = 0;
+    f->data = NULL;
+
+    fsm->version = version;
+    fsm->data = f;
+    fsm->apply = fsmApply;
+    fsm->snapshot = fsmSnapshotInitialize;
+    fsm->snapshot_async = fsmSnapshotAsync;
+    fsm->snapshot_finalize = fsmSnapshotFinalize;
+    fsm->restore = fsmRestore;
 }
 
 void FsmClose(struct raft_fsm *fsm)

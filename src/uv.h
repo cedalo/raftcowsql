@@ -284,6 +284,11 @@ int UvSnapshotGet(struct raft_io *io,
                   struct raft_io_snapshot_get *req,
                   raft_io_snapshot_get_cb cb);
 
+/* Implementation of raft_io->async_work (defined in uv_work.c). */
+int UvAsyncWork(struct raft_io *io,
+                struct raft_io_async_work *req,
+                raft_io_async_work_cb cb);
+
 /* Cancel any pending snapshot operation. */
 void UvSnapshotClose(struct uv *uv);
 
