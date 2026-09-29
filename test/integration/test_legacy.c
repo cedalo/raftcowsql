@@ -65,9 +65,80 @@ static int ioMethodSnapshotPutFail(struct raft_io *raft_io,
         }                                                                \
     }
 
-static char *fsm_version[] = {"1", "2", NULL};
+static int ioMethodAsyncWorkFail(struct raft_io *raft_io,
+                                 struct raft_io_async_work *req,
+                                 raft_io_async_work_cb cb)
+{
+    (void)raft_io;
+    (void)req;
+    (void)cb;
+    return -1;
+}
+
+#define SET_FAULTY_ASYNC_WORK()                                      \
+    {                                                                \
+        unsigned i;                                                  \
+        for (i = 0; i < CLUSTER_N; i++) {                            \
+            CLUSTER_RAFT(i)->io->async_work = ioMethodAsyncWorkFail; \
+        }                                                            \
+    }
+
+static int fsmSnapshotFail(struct raft_fsm *fsm,
+                           struct raft_buffer *bufs[],
+                           unsigned *n_bufs)
+{
+    (void)fsm;
+    (void)bufs;
+    (void)n_bufs;
+    return -1;
+}
+
+#define SET_FAULTY_SNAPSHOT_ASYNC()                                 \
+    {                                                               \
+        unsigned i;                                                 \
+        for (i = 0; i < CLUSTER_N; i++) {                           \
+            CLUSTER_RAFT(i)->fsm->snapshot_async = fsmSnapshotFail; \
+        }                                                           \
+    }
+
+static int (*fsmSnapshotAsyncOrig)(struct raft_fsm *fsm,
+                                   struct raft_buffer *bufs[],
+                                   unsigned *n_bufs);
+static bool fsmSnapshotAsyncFailed;
+
+/* Fail the first async snapshot only, then behave normally. */
+static int fsmSnapshotAsyncFailOnce(struct raft_fsm *fsm,
+                                    struct raft_buffer *bufs[],
+                                    unsigned *n_bufs)
+{
+    if (!fsmSnapshotAsyncFailed) {
+        fsmSnapshotAsyncFailed = true;
+        return -1;
+    }
+    return fsmSnapshotAsyncOrig(fsm, bufs, n_bufs);
+}
+
+/* Make the first async snapshot taken by server I fail. */
+#define SET_FAULTY_SNAPSHOT_ASYNC_ONCE(I)                                \
+    {                                                                    \
+        fsmSnapshotAsyncFailed = false;                                  \
+        fsmSnapshotAsyncOrig = CLUSTER_RAFT(I)->fsm->snapshot_async;     \
+        CLUSTER_RAFT(I)->fsm->snapshot_async = fsmSnapshotAsyncFailOnce; \
+    }
+
+static char *fsm_version[] = {"1", "2", "3", NULL};
+static char *fsm_snapshot_async[] = {"0", "1", NULL};
 static MunitParameterEnum fsm_snapshot_async_params[] = {
+    {CLUSTER_SS_ASYNC_PARAM, fsm_snapshot_async},
     {CLUSTER_FSM_VERSION_PARAM, fsm_version},
+    {NULL, NULL},
+};
+
+static char *fsm_snapshot_only_async[] = {"1", NULL};
+static char *fsm_version_only_async[] = {"3", NULL};
+static MunitParameterEnum fsm_snapshot_only_async_params[] = {
+    {CLUSTER_SS_ASYNC_PARAM, fsm_snapshot_only_async},
+    {CLUSTER_FSM_VERSION_PARAM, fsm_version_only_async},
     {NULL, NULL},
 };
 
@@ -93,6 +164,98 @@ TEST(legacy,
     CLUSTER_MAKE_PROGRESS;
 
     /* No crash or leaks have occurred */
+    return MUNIT_OK;
+}
+
+/* The io->async_work method fails when submitting the async snapshot work. */
+TEST(legacy,
+     takeSnapshotAsyncWorkFail,
+     setUp,
+     tearDown,
+     0,
+     fsm_snapshot_async_params)
+{
+    struct fixture *f = data;
+    (void)params;
+
+    SET_FAULTY_ASYNC_WORK();
+
+    /* Set very low threshold and trailing entries number */
+    SET_SNAPSHOT_THRESHOLD(3);
+    SET_SNAPSHOT_TRAILING(1);
+
+    /* Apply a few of entries, to force a snapshot to be taken. */
+    CLUSTER_MAKE_PROGRESS;
+    CLUSTER_MAKE_PROGRESS;
+    CLUSTER_MAKE_PROGRESS;
+
+    /* No crash or leaks have occurred */
+    return MUNIT_OK;
+}
+
+/* The fsm->snapshot_async method fails. */
+TEST(legacy,
+     takeSnapshotAsyncFail,
+     setUp,
+     tearDown,
+     0,
+     fsm_snapshot_only_async_params)
+{
+    struct fixture *f = data;
+    (void)params;
+
+    SET_FAULTY_SNAPSHOT_ASYNC();
+
+    /* Set very low threshold and trailing entries number */
+    SET_SNAPSHOT_THRESHOLD(3);
+    SET_SNAPSHOT_TRAILING(1);
+
+    /* Apply a few of entries, to force a snapshot to be taken. */
+    CLUSTER_MAKE_PROGRESS;
+    CLUSTER_MAKE_PROGRESS;
+    CLUSTER_MAKE_PROGRESS;
+
+    /* No crash or leaks have occurred */
+    return MUNIT_OK;
+}
+
+/* The fsm->snapshot_async method fails only for the first snapshot, the next
+ * one succeeds and can be sent to a follower that has fallen behind. */
+TEST(legacy,
+     takeSnapshotAsyncFailOnce,
+     setUp,
+     tearDown,
+     0,
+     fsm_snapshot_only_async_params)
+{
+    struct fixture *f = data;
+    (void)params;
+
+    /* Set very low threshold and trailing entries number */
+    SET_SNAPSHOT_THRESHOLD(3);
+    SET_SNAPSHOT_TRAILING(1);
+    CLUSTER_SATURATE_BOTHWAYS(0, 2);
+
+    /* Make the first snapshot taken by the leader fail */
+    SET_FAULTY_SNAPSHOT_ASYNC_ONCE(0);
+
+    /* Apply a few of entries, to force a snapshot to be taken. */
+    CLUSTER_MAKE_PROGRESS;
+    CLUSTER_MAKE_PROGRESS;
+    /* Wait for the first snapshot to fail and for a new one to succeed. */
+    CLUSTER_STEP_UNTIL_ELAPSED(500);
+    munit_assert_true(fsmSnapshotAsyncFailed);
+
+    CLUSTER_MAKE_PROGRESS;
+    CLUSTER_STEP_UNTIL_ELAPSED(500);
+
+    /* Reconnect the follower and wait for it to catch up */
+    CLUSTER_DESATURATE_BOTHWAYS(0, 2);
+    CLUSTER_STEP_UNTIL_APPLIED(2, 4, 5000);
+
+    /* Check that the leader has sent a snapshot */
+    munit_assert_int(CLUSTER_N_SEND(0, RAFT_INSTALL_SNAPSHOT), ==, 1);
+    munit_assert_int(CLUSTER_N_RECV(2, RAFT_INSTALL_SNAPSHOT), ==, 1);
     return MUNIT_OK;
 }
 
@@ -457,5 +620,50 @@ TEST(raft_init, fsmVersionNotSet, NULL, NULL, 0, NULL)
     rc = raft_init(&r, &io, &fsm, 1, "1");
     munit_assert_int(rc, ==, -1);
     munit_assert_string_equal(r.errmsg, "fsm->version must be set");
+    return MUNIT_OK;
+}
+
+/* Incompatible raft->io and raft->fsm wrt async snapshots: the io version is
+ * too low. */
+TEST(raft_init, incompatIoFsmAsyncSnapshotVersion, NULL, NULL, 0, NULL)
+{
+    struct raft r = {0};
+    struct raft_io io = {0};
+    struct raft_fsm fsm = {0};
+    io.version = 1; /* Too low */
+    io.async_work = (int (*)(struct raft_io *, struct raft_io_async_work *,
+                             raft_io_async_work_cb))(uintptr_t)0xDEADBEEF;
+    fsm.version = 3;
+    fsm.snapshot_async = (int (*)(struct raft_fsm *, struct raft_buffer **,
+                                  unsigned *))(uintptr_t)0xDEADBEEF;
+
+    int rc;
+    rc = raft_init(&r, &io, &fsm, 1, "1");
+    munit_assert_int(rc, ==, -1);
+    munit_assert_string_equal(
+        r.errmsg,
+        "async snapshot requires io->version > 1 and async_work method.");
+    return MUNIT_OK;
+}
+
+/* Incompatible raft->io and raft->fsm wrt async snapshots: the io doesn't
+ * implement the async_work method. */
+TEST(raft_init, incompatIoFsmAsyncSnapshotNull, NULL, NULL, 0, NULL)
+{
+    struct raft r = {0};
+    struct raft_io io = {0};
+    struct raft_fsm fsm = {0};
+    io.version = 2;
+    io.async_work = NULL;
+    fsm.version = 3;
+    fsm.snapshot_async = (int (*)(struct raft_fsm *, struct raft_buffer **,
+                                  unsigned *))(uintptr_t)0xDEADBEEF;
+
+    int rc;
+    rc = raft_init(&r, &io, &fsm, 1, "1");
+    munit_assert_int(rc, ==, -1);
+    munit_assert_string_equal(
+        r.errmsg,
+        "async snapshot requires io->version > 1 and async_work method.");
     return MUNIT_OK;
 }

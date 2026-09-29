@@ -847,6 +847,7 @@ int raft_uv_init(struct raft_io *io,
     io->send = UvSend;
     io->snapshot_put = UvSnapshotPut;
     io->snapshot_get = UvSnapshotGet;
+    io->async_work = UvAsyncWork;
     io->time = uvTime;
     io->random = uvRandom;
 

@@ -112,6 +112,13 @@ struct snapshot_get
     struct raft_io_snapshot_get *req;
 };
 
+/* Pending request to perform general work. */
+struct async_work
+{
+    REQUEST;
+    struct raft_io_async_work *req;
+};
+
 /* Message that has been written to the network and is waiting to be delivered
  * (or discarded). */
 struct transmit
@@ -336,6 +343,16 @@ static void ioFlushSnapshotGet(struct io *s, struct snapshot_get *r)
     raft_free(r);
 }
 
+/* Flush an async work request */
+static void ioFlushAsyncWork(struct io *s, struct async_work *r)
+{
+    (void)s;
+    int rv;
+    rv = r->req->work(r->req);
+    r->req->cb(r->req, rv);
+    raft_free(r);
+}
+
 /* Search for the peer with the given ID. */
 static struct peer *ioGetPeer(struct io *io, raft_id id)
 {
@@ -472,6 +489,9 @@ static void ioFlushAll(struct io *io)
                 break;
             case SNAPSHOT_GET:
                 ioFlushSnapshotGet(io, (struct snapshot_get *)r);
+                break;
+            case ASYNC_WORK:
+                ioFlushAsyncWork(io, (struct async_work *)r);
                 break;
             default:
                 assert(0);
@@ -715,6 +735,25 @@ static int ioMethodSnapshotPut(struct raft_io *raft_io,
     return 0;
 }
 
+static int ioMethodAsyncWork(struct raft_io *raft_io,
+                             struct raft_io_async_work *req,
+                             raft_io_async_work_cb cb)
+{
+    struct io *io = raft_io->impl;
+    struct async_work *r;
+
+    r = raft_malloc(sizeof *r);
+    assert(r != NULL);
+
+    r->type = ASYNC_WORK;
+    r->req = req;
+    r->req->cb = cb;
+    r->completion_time = *io->time + io->work_duration;
+
+    QUEUE_PUSH(&io->requests, &r->queue);
+    return 0;
+}
+
 static int ioMethodSnapshotGet(struct raft_io *raft_io,
                                struct raft_io_snapshot_get *req,
                                raft_io_snapshot_get_cb cb)
@@ -946,6 +985,7 @@ static int ioInit(struct raft_io *raft_io, unsigned index, raft_time *time)
     raft_io->send = ioMethodSend;
     raft_io->snapshot_put = ioMethodSnapshotPut;
     raft_io->snapshot_get = ioMethodSnapshotGet;
+    raft_io->async_work = ioMethodAsyncWork;
     raft_io->time = ioMethodTime;
     raft_io->random = ioMethodRandom;
 
@@ -1493,6 +1533,10 @@ static void completeRequest(struct raft_fixture *f, unsigned i, raft_time t)
         case SNAPSHOT_GET:
             ioFlushSnapshotGet(io, (struct snapshot_get *)r);
             f->event->type = RAFT_FIXTURE_DISK;
+            break;
+        case ASYNC_WORK:
+            ioFlushAsyncWork(io, (struct async_work *)r);
+            f->event->type = RAFT_FIXTURE_WORK;
             break;
         default:
             assert(0);

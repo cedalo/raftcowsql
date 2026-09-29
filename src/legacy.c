@@ -461,6 +461,7 @@ struct legacyTakeSnapshot
     struct raft_snapshot_metadata metadata;
     struct raft_snapshot snapshot;
     struct raft_io_snapshot_put put;
+    struct raft_io_async_work work;
 };
 
 /*
@@ -484,6 +485,30 @@ static void takeSnapshotClose(struct raft *r, struct raft_snapshot *s)
     r->fsm->snapshot_finalize(r->fsm, &s->bufs, &s->n_bufs);
 }
 
+/* Resume an install snapshot request that was put on hold because a snapshot
+ * was being taken, or cancel it if we are shutting down. */
+static void legacyResumePersistSnapshot(struct raft *r)
+{
+    struct legacyPersistSnapshot *persist;
+    int rv;
+
+    if (r->legacy.snapshot_pending == NULL) {
+        return;
+    }
+
+    persist = r->legacy.snapshot_pending;
+    r->legacy.snapshot_pending = NULL;
+
+    if (r->legacy.closing) {
+        legacyCancelPersistSnapshot(persist);
+        raft_free(persist);
+        return;
+    }
+
+    rv = legacyPersistSnapshotStart(persist);
+    assert(rv == 0);
+}
+
 static void takeSnapshotCb(struct raft_io_snapshot_put *put, int status)
 {
     struct legacyTakeSnapshot *req = put->data;
@@ -502,19 +527,14 @@ static void takeSnapshotCb(struct raft_io_snapshot_put *put, int status)
     if (r->legacy.closing) {
         tracef("cancelling snapshot");
         status = RAFT_CANCELED;
-
-        /* Also cancel any persist snapshot request. */
-        if (r->legacy.snapshot_pending != NULL) {
-            struct legacyPersistSnapshot *persist;
-            persist = r->legacy.snapshot_pending;
-            legacyCancelPersistSnapshot(persist);
-        }
     }
 
     if (status != 0) {
         assert(r->legacy.closing);
         assert(status == RAFT_CANCELED);
         configurationClose(&metadata.configuration);
+        /* Also cancel any pending persist snapshot request. */
+        legacyResumePersistSnapshot(r);
         return;
     }
 
@@ -526,14 +546,7 @@ static void takeSnapshotCb(struct raft_io_snapshot_put *put, int status)
     event.snapshot.trailing = r->legacy.snapshot_trailing;
     LegacyForwardToRaftIo(r, &event);
 
-    if (r->legacy.snapshot_pending != NULL) {
-        struct legacyPersistSnapshot *persist;
-        int rv;
-        persist = r->legacy.snapshot_pending;
-        r->legacy.snapshot_pending = NULL;
-        rv = legacyPersistSnapshotStart(persist);
-        assert(rv == 0);
-    }
+    legacyResumePersistSnapshot(r);
 }
 
 static int putSnapshot(struct legacyTakeSnapshot *req)
@@ -546,6 +559,57 @@ static int putSnapshot(struct legacyTakeSnapshot *req)
     rv = r->io->snapshot_put(r->io, r->legacy.snapshot_trailing, &req->put,
                              snapshot, takeSnapshotCb);
     return rv;
+}
+
+/* Release all resources of a take snapshot request that won't be completed. */
+static void takeSnapshotAbort(struct legacyTakeSnapshot *req)
+{
+    struct raft *r = req->r;
+
+    takeSnapshotClose(r, &req->snapshot);
+    configurationClose(&req->metadata.configuration);
+    raft_free(req);
+
+    /* An install snapshot request might have been put on hold while we were
+     * taking this snapshot. */
+    legacyResumePersistSnapshot(r);
+}
+
+/* Run the second, possibly expensive, phase of taking a snapshot. This is
+ * executed outside of the main loop, by means of the io->async_work method. */
+static int takeSnapshotAsync(struct raft_io_async_work *work)
+{
+    struct legacyTakeSnapshot *req = work->data;
+    struct raft *r = req->r;
+    struct raft_snapshot *snapshot = &req->snapshot;
+
+    return r->fsm->snapshot_async(r->fsm, &snapshot->bufs, &snapshot->n_bufs);
+}
+
+/* Invoked in the main loop once fsm->snapshot_async() has completed. */
+static void takeSnapshotAsyncCb(struct raft_io_async_work *work, int status)
+{
+    struct legacyTakeSnapshot *req = work->data;
+    struct raft *r = req->r;
+    int rv;
+
+    if (status != 0) {
+        tracef("take snapshot async at %llu failed: %s", req->metadata.index,
+               raft_strerror(status));
+        takeSnapshotAbort(req);
+        return;
+    }
+
+    tracef("take snapshot async at %llu completed", req->metadata.index);
+
+    rv = putSnapshot(req);
+    if (rv != 0) {
+        tracef("put snapshot at %llu failed: %s", req->metadata.index,
+               raft_strerror(rv));
+        ErrMsgTransferf(r->io->errmsg, r->errmsg, "put snapshot at %llu",
+                        req->metadata.index);
+        takeSnapshotAbort(req);
+    }
 }
 
 static bool legacyShouldTakeSnapshot(struct raft *r)
@@ -645,13 +709,27 @@ static void legacyTakeSnapshot(struct raft *r)
     snapshot->n_bufs = 0;
 
     rv = r->fsm->snapshot(r->fsm, &snapshot->bufs, &snapshot->n_bufs);
-    if (rv == 0 && r->fsm->version >= 3 && r->fsm->snapshot_async != NULL) {
-        rv = r->fsm->snapshot_async(r->fsm, &snapshot->bufs, &snapshot->n_bufs);
-    }
     if (rv != 0) {
         ErrMsgTransferf(r->io->errmsg, r->errmsg, "load snapshot at %llu",
                         metadata.index);
         goto abort_after_conf_fetched;
+    }
+
+    /* From this point on a snapshot is in progress: any install snapshot
+     * request will be put on hold until this snapshot completes. */
+    r->legacy.snapshot_taking = true;
+
+    if (r->fsm->version >= 3 && r->fsm->snapshot_async != NULL) {
+        /* Run the expensive part of the snapshot outside of the main loop. */
+        tracef("take snapshot async at %llu", metadata.index);
+        req->work.data = req;
+        req->work.work = takeSnapshotAsync;
+        rv = r->io->async_work(r->io, &req->work, takeSnapshotAsyncCb);
+        if (rv != 0) {
+            tracef("async work failed %d", rv);
+            goto abort_after_snapshot;
+        }
+        return;
     }
 
     /* putSnapshot will clean up config and buffers in case of error */
@@ -660,11 +738,10 @@ static void legacyTakeSnapshot(struct raft *r)
         goto abort_after_snapshot;
     }
 
-    r->legacy.snapshot_taking = true;
-
     return;
 
 abort_after_snapshot:
+    /* Finalizes the snapshot and resets r->legacy.snapshot_taking */
     takeSnapshotClose(r, snapshot);
 abort_after_conf_fetched:
     configurationClose(&metadata.configuration);
